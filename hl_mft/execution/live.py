@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 from eth_account import Account
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
+from hyperliquid.utils.signing import Grouping
+from hyperliquid.utils.signing import OrderRequest as SdkOrderRequest
 from hyperliquid.utils.types import Cloid
 
 from .. import metrics
@@ -99,17 +101,21 @@ class LiveBroker:
         o = OpenOrder(req, time.time_ns())
         self.orders.setdefault(req.coin, {})[req.cid] = o
         metrics.orders_sent.labels(coin=req.coin, kind=req.kind).inc()
+        sdk_req: SdkOrderRequest = {
+            "coin": req.coin,
+            "is_buy": req.side > 0,
+            "sz": req.sz,
+            "limit_px": req.px,
+            "order_type": {"limit": {"tif": tif}},
+            "reduce_only": req.reduce_only,
+            "cloid": cloid,
+        }
+        grouping: Grouping = "na"
+        prio_bps = self.cfg.fees.taker_priority_fee_bps
+        if tif == "Ioc" and prio_bps > 0:
+            grouping = {"p": int(round(prio_bps * 10_000))}  # p / 1e8 of notional; 1 bp == 10_000
         try:
-            resp = await asyncio.to_thread(
-                self.ex.order,
-                req.coin,
-                req.side > 0,
-                req.sz,
-                req.px,
-                {"limit": {"tif": tif}},
-                req.reduce_only,
-                cloid,
-            )
+            resp = await asyncio.to_thread(self.ex.bulk_orders, [sdk_req], None, grouping)
         except Exception as e:  # noqa: BLE001
             self.orders[req.coin].pop(req.cid, None)
             await self._emit(req, "rejected", repr(e)[:120])

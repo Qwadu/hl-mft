@@ -58,7 +58,10 @@ risk:
   max_actions_per_minute: 60
   reconcile_interval_s: 5
 
-fees: {maker_bps: 1.5, taker_bps: 4.5}
+# Base tier-0 fees; staking >10 HYPE gives 5% off (up to 40% at Diamond) — adjust after checking your tier.
+# taker_priority_fee_bps: HL order-priority for IOC orders (paid in HYPE from undelegated staking balance,
+# ~45 ms latency gain per bp, max 8). Off by default; enable only once taker fills are shown to be race-sensitive.
+fees: {maker_bps: 1.5, taker_bps: 4.5, taker_priority_fee_bps: 0}
 paper: {equity_start: 500, latency_ms: 60, taker_slippage_bps: 0.5}
 
 recorder:

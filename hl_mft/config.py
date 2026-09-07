@@ -99,6 +99,9 @@ class RiskConfig(BaseModel):
 class FeesConfig(BaseModel):
     maker_bps: float = 1.5
     taker_bps: float = 4.5
+    # HL order-priority fee for IOC (taker) orders, charged in HYPE from undelegated staking balance as a
+    # fraction of filled notional; 0-8 bps buys ~45 ms of end-to-end latency per bp (per HL docs). 0 = off.
+    taker_priority_fee_bps: float = 0.0
 
 
 class PaperConfig(BaseModel):
