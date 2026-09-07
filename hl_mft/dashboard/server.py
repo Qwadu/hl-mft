@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import secrets as pysecrets
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import uvicorn
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
+
+from ..logging_setup import get_logger
+
+if TYPE_CHECKING:
+    from ..app import App
+
+log = get_logger(__name__)
+HTML = (Path(__file__).parent / "index.html").read_text()
+
+
+class ParamUpdate(BaseModel):
+    strategy: dict[str, Any] = {}
+    risk: dict[str, Any] = {}
+    persist: bool = False
+
+
+def build_app(app: App) -> FastAPI:
+    token = app.secrets.dashboard_token
+
+    def auth(request: Request) -> None:
+        supplied = (
+            request.headers.get("x-token")
+            or request.query_params.get("token")
+            or request.cookies.get("token")
+        )
+        if not supplied or not pysecrets.compare_digest(supplied, token):
+            raise HTTPException(status_code=401, detail="bad token")
+
+    api = FastAPI(title="hl-mft", docs_url=None, redoc_url=None)
+
+    @api.get("/", response_class=HTMLResponse)
+    async def index(request: Request) -> Any:
+        t = request.query_params.get("token")
+        resp = HTMLResponse(HTML)
+        if t:
+            resp.set_cookie("token", t, httponly=True, samesite="strict")
+        return resp
+
+    @api.get("/api/status", dependencies=[Depends(auth)])
+    async def status() -> Any:
+        return app.status()
+
+    @api.get("/api/portfolio", dependencies=[Depends(auth)])
+    async def portfolio() -> Any:
+        return app.pf.snapshot() if app.pf else {}
+
+    @api.get("/api/strategy", dependencies=[Depends(auth)])
+    async def strategy() -> Any:
+        return app.strategy.snapshot() if app.strategy else {}
+
+    @api.get("/api/events", dependencies=[Depends(auth)])
+    async def events(n: int = 100) -> Any:
+        return app.strategy.events[-n:] if app.strategy else []
+
+    @api.get("/api/orders", dependencies=[Depends(auth)])
+    async def orders() -> Any:
+        if not app.broker:
+            return []
+        out = []
+        for c in app.coins:
+            for o in app.broker.open_orders(c):
+                out.append(
+                    {
+                        "coin": c,
+                        "cid": o.req.cid,
+                        "side": o.req.side,
+                        "px": o.req.px,
+                        "sz": o.req.sz,
+                        "kind": o.req.kind,
+                        "filled": o.filled_sz,
+                        "tag": o.req.tag,
+                        "oid": o.oid,
+                    }
+                )
+        return out
+
+    @api.get("/api/params", dependencies=[Depends(auth)])
+    async def params() -> Any:
+        return {
+            "strategy": app.cfg.strategy.model_dump(),
+            "risk": app.cfg.risk.model_dump(),
+            "mode": app.cfg.mode,
+        }
+
+    @api.post("/api/params", dependencies=[Depends(auth)])
+    async def set_params(upd: ParamUpdate) -> Any:
+        new_strat = app.cfg.strategy.model_copy(update=upd.strategy)
+        new_risk = app.cfg.risk.model_copy(update=upd.risk)
+        type(app.cfg.strategy).model_validate(new_strat.model_dump())
+        type(app.cfg.risk).model_validate(new_risk.model_dump())
+        for k, v in upd.strategy.items():
+            setattr(app.cfg.strategy, k, v)
+        for k, v in upd.risk.items():
+            setattr(app.cfg.risk, k, v)
+        if app.risk:
+            app.risk.budget.per_minute = app.cfg.risk.max_actions_per_minute
+        if upd.persist and app.config_path:
+            app.cfg.dump(app.config_path)
+        log.info("params_updated", strategy=upd.strategy, risk=upd.risk, persist=upd.persist)
+        return {"ok": True}
+
+    @api.post("/api/pause", dependencies=[Depends(auth)])
+    async def pause() -> Any:
+        if app.risk:
+            app.risk.paused = True
+        return {"ok": True}
+
+    @api.post("/api/resume", dependencies=[Depends(auth)])
+    async def resume() -> Any:
+        if app.risk:
+            app.risk.paused = False
+        return {"ok": True}
+
+    @api.post("/api/kill", dependencies=[Depends(auth)])
+    async def kill() -> Any:
+        if app.risk:
+            app.risk.trip("manual")
+        if app.strategy:
+            await app.strategy.flatten_all("manual_kill")
+        return {"ok": True}
+
+    @api.post("/api/reset-kill", dependencies=[Depends(auth)])
+    async def reset_kill() -> Any:
+        if app.risk:
+            app.risk.reset()
+        return {"ok": True}
+
+    @api.post("/api/flatten", dependencies=[Depends(auth)])
+    async def flatten() -> Any:
+        if app.strategy:
+            await app.strategy.flatten_all("manual_flatten")
+        return {"ok": True}
+
+    @api.post("/api/strategy/{state}", dependencies=[Depends(auth)])
+    async def toggle(state: str) -> Any:
+        if app.strategy:
+            app.strategy.enabled = state == "on"
+        return {"ok": True, "enabled": app.strategy.enabled if app.strategy else None}
+
+    @api.exception_handler(Exception)
+    async def _err(_: Request, exc: Exception) -> JSONResponse:
+        log.exception("dashboard_error")
+        return JSONResponse(status_code=500, content={"error": repr(exc)})
+
+    return api
+
+
+async def serve_dashboard(app: App) -> None:
+    api = build_app(app)
+    config = uvicorn.Config(
+        api, host=app.cfg.dashboard.host, port=app.cfg.dashboard.port, log_level="warning", loop="none"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()

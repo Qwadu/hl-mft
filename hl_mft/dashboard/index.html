@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hl-mft</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --fg:#e6e6e6; --muted:#8a919e; --green:#3ddc84; --red:#ff5c5c; --amber:#ffb347; --blue:#5aa9ff; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; border-bottom:1px solid #262a33; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 12px 0 0; }
+  .pill { padding:2px 8px; border-radius:10px; background:#262a33; color:var(--muted); }
+  .pill.ok { background:#163d2a; color:var(--green); } .pill.bad { background:#4a1c1c; color:var(--red); } .pill.warn { background:#4a3a1c; color:var(--amber); }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:12px 16px; }
+  .card { background:var(--card); border:1px solid #262a33; border-radius:8px; padding:10px 12px; overflow:auto; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 8px; }
+  .wide { grid-column: 1 / -1; }
+  table { width:100%; border-collapse:collapse; } th,td { text-align:right; padding:3px 6px; border-bottom:1px solid #22262e; white-space:nowrap; } th { color:var(--muted); font-weight:normal; } td:first-child,th:first-child { text-align:left; }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  button { background:#262a33; color:var(--fg); border:1px solid #333947; border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
+  button:hover { background:#333947; } button.danger { border-color:#7a2a2a; color:var(--red); } button.primary { border-color:#2a5a8a; color:var(--blue); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+  input { background:#0f1115; color:var(--fg); border:1px solid #333947; border-radius:4px; padding:4px 6px; width:90px; font:inherit; }
+  label { color:var(--muted); display:inline-flex; gap:6px; align-items:center; }
+  .kpi { display:grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  .kpi div { background:#0f1115; border-radius:6px; padding:8px; } .kpi b { display:block; font-size:16px; } .kpi span { color:var(--muted); font-size:11px; }
+  #log { max-height:260px; overflow:auto; font-size:12px; } #log div { border-bottom:1px solid #22262e; padding:2px 0; }
+  .bar { height:6px; background:#262a33; border-radius:3px; position:relative; } .bar i { position:absolute; top:0; bottom:0; left:50%; background:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>hl-mft</h1>
+  <span id="mode" class="pill"></span>
+  <span id="uptime" class="pill"></span>
+  <span id="feeds"></span>
+  <span id="risk" class="pill"></span>
+  <span style="flex:1"></span>
+  <button id="btn-pause">Pause entries</button>
+  <button id="btn-resume">Resume</button>
+  <button id="btn-flatten" class="danger">Flatten all</button>
+  <button id="btn-kill" class="danger">KILL</button>
+  <button id="btn-reset">Reset kill</button>
+</header>
+<main>
+  <section class="card wide"><h2>Portfolio</h2><div class="kpi" id="kpi"></div></section>
+  <section class="card"><h2>Positions</h2><table id="positions"></table></section>
+  <section class="card"><h2>Open orders</h2><table id="orders"></table></section>
+  <section class="card wide"><h2>Signals</h2><table id="signals"></table></section>
+  <section class="card"><h2>Parameters</h2><div id="params"></div>
+    <div class="row"><button id="btn-apply" class="primary">Apply</button><label><input type="checkbox" id="persist" style="width:auto"> persist to config.yaml</label><span id="param-msg" class="pill"></span></div>
+  </section>
+  <section class="card"><h2>Events</h2><div id="log"></div></section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const fmt = (x, d=2) => x==null ? '—' : (typeof x==='number' ? x.toFixed(d) : x);
+const cls = x => x>0 ? 'pos' : x<0 ? 'neg' : '';
+async function api(path, opts={}) { const r = await fetch(path, {credentials:'same-origin', ...opts}); if (r.status===401) { document.body.innerHTML='<p style="padding:20px">401 — open with ?token=…</p>'; throw new Error('401'); } return r.json(); }
+async function post(path, body) { return api(path, {method:'POST', headers:{'content-type':'application/json'}, body: body?JSON.stringify(body):undefined}); }
+
+const PARAM_KEYS = {strategy:['theta_enter','theta_taker','theta_exit','take_profit_bps','stop_loss_vol_mult','min_stop_bps','max_hold_s','passive_ttl_s','cooldown_s','max_spread_bps'], risk:['risk_per_trade_pct','max_positions','max_gross_leverage','max_notional_per_position_usd','daily_loss_stop_pct','max_drawdown_stop_pct','max_actions_per_minute']};
+let paramsLoaded = false;
+async function loadParams() {
+  const p = await api('/api/params'); const box = $('#params'); box.innerHTML='';
+  for (const grp of ['strategy','risk']) { const h = document.createElement('div'); h.className='row'; h.innerHTML=`<b style="width:70px">${grp}</b>`; box.appendChild(h);
+    for (const k of PARAM_KEYS[grp]) { const l = document.createElement('label'); l.innerHTML = `${k} <input data-grp="${grp}" data-key="${k}" value="${p[grp][k]}">`; h.appendChild(l); } }
+  if (p.strategy.weights) { const h = document.createElement('div'); h.className='row'; h.innerHTML='<b style="width:70px">weights</b>'; for (const [k,v] of Object.entries(p.strategy.weights)) { const l=document.createElement('label'); l.innerHTML=`${k} <input data-grp="w" data-key="${k}" value="${v}">`; h.appendChild(l);} box.appendChild(h); }
+  paramsLoaded = true;
+}
+$('#btn-apply').onclick = async () => {
+  const upd = {strategy:{}, risk:{}, persist: $('#persist').checked}; const w = {};
+  document.querySelectorAll('#params input[data-grp]').forEach(i => { const v = parseFloat(i.value); if (isNaN(v)) return; if (i.dataset.grp==='w') w[i.dataset.key]=v; else upd[i.dataset.grp][i.dataset.key]=v; });
+  if (Object.keys(w).length) upd.strategy.weights = w;
+  const r = await post('/api/params', upd); $('#param-msg').textContent = r.ok ? 'applied' : JSON.stringify(r); setTimeout(()=>$('#param-msg').textContent='', 2000);
+};
+$('#btn-pause').onclick = () => post('/api/pause'); $('#btn-resume').onclick = () => post('/api/resume');
+$('#btn-flatten').onclick = () => confirm('Flatten all positions (taker)?') && post('/api/flatten');
+$('#btn-kill').onclick = () => confirm('KILL: trip kill-switch and flatten everything?') && post('/api/kill');
+$('#btn-reset').onclick = () => confirm('Reset kill-switch?') && post('/api/reset-kill');
+
+function table(el, rows, cols) { el.innerHTML = '<tr>'+cols.map(c=>`<th>${c[0]}</th>`).join('')+'</tr>' + rows.map(r=>'<tr>'+cols.map(c=>{const v=c[1](r); return `<td class="${c[2]?c[2](r):''}">${v}</td>`;}).join('')+'</tr>').join(''); }
+
+async function tick() {
+  const [st, pf, sg, ev, od] = await Promise.all([api('/api/status'), api('/api/portfolio'), api('/api/strategy'), api('/api/events?n=60'), api('/api/orders')]);
+  $('#mode').textContent = st.mode.toUpperCase(); $('#mode').className = 'pill ' + (st.mode==='live'?'bad':st.mode==='paper'?'warn':'');
+  $('#uptime').textContent = 'up ' + Math.floor(st.uptime_s/60) + 'm';
+  $('#feeds').innerHTML = Object.entries(st.feeds).map(([n,f]) => `<span class="pill ${f.connected&&!f.stale?'ok':'bad'}">${n}${f.stale?' stale':''} r${f.reconnects}</span>`).join(' ');
+  if (st.risk) { const r = st.risk; $('#risk').textContent = r.killed ? 'KILLED: '+r.kill_reason : r.paused ? 'PAUSED' : (st.strategy_enabled ? 'TRADING' : 'STRATEGY OFF'); $('#risk').className = 'pill ' + (r.killed?'bad':r.paused?'warn':'ok'); } else { $('#risk').textContent = 'record only'; }
+  if (pf.equity !== undefined) {
+    $('#kpi').innerHTML = [['equity',pf.equity,'$'],['daily pnl',pf.daily_pnl,'$'],['realized',pf.realized,'$'],['fees',pf.fees,'$'],['unrealized',pf.unrealized,'$'],['drawdown',pf.drawdown_pct,'%'],['gross',pf.gross_notional,'$'],['closed',pf.trades_closed,''],['win rate',pf.win_rate==null?null:pf.win_rate*100,'%']]
+      .map(([k,v,u]) => `<div><b class="${k!=='equity'&&k!=='fees'&&k!=='gross'&&k!=='closed'?cls(v):''}">${fmt(v)}${u}</b><span>${k}</span></div>`).join('');
+    table($('#positions'), pf.positions||[], [['coin',r=>r.coin],['size',r=>r.size],['entry',r=>r.entry_px],['mark',r=>r.mark],['upnl',r=>fmt(r.upnl,3),r=>cls(r.upnl)],['age s',r=>r.age_s],['score@in',r=>r.entry_score]]);
+  } else { $('#kpi').innerHTML = `<div><b>${st.counts.l2}</b><span>l2 msgs</span></div><div><b>${st.counts.trades}</b><span>trades</span></div><div><b>${st.counts.ref}</b><span>ref ticks</span></div>` + (st.recorder?Object.entries(st.recorder).map(([k,v])=>`<div><b>${v}</b><span>${k} rows</span></div>`).join(''):''); }
+  table($('#orders'), od, [['coin',r=>r.coin],['side',r=>r.side>0?'BUY':'SELL',r=>r.side>0?'pos':'neg'],['kind',r=>r.kind],['px',r=>r.px],['sz',r=>r.sz],['filled',r=>r.filled],['tag',r=>r.tag]]);
+  const rows = Object.entries(sg).map(([c,s])=>({coin:c,...s})).sort((a,b)=>Math.abs(b.score)-Math.abs(a.score));
+  table($('#signals'), rows, [['coin',r=>r.coin],['score',r=>fmt(r.score),r=>cls(r.score)],['',r=>`<div class="bar" style="width:80px"><i style="${r.score>=0?'left:50%;width:'+Math.min(50,Math.abs(r.score)*10)+'%':'right:50%;left:auto;width:'+Math.min(50,Math.abs(r.score)*10)+'%'}"></i></div>`],['mid',r=>r.mid],['spr bps',r=>r.spread_bps],['obi5',r=>fmt(r.f.obi_5,3)],['z obi5',r=>fmt(r.z.obi_5)],['μp bps',r=>fmt(r.f.microprice_bps)],['cvd5',r=>fmt(r.f.cvd_5)],['z cvd5',r=>fmt(r.z.cvd_5)],['lead bps',r=>fmt(r.f.leadlag_bps)],['z lead',r=>fmt(r.z.leadlag_bps)],['rv',r=>fmt(r.f.rv_bps,1)],['vol5 $',r=>fmt(r.f.vol_5,0)],['ref ms',r=>fmt(r.f.ref_age_ms,0)],['pend',r=>(r.entry_cid?'E':'')+(r.exit_cid?'X':'')]]);
+  $('#log').innerHTML = ev.slice().reverse().map(e => { const t = new Date(e.t*1000).toISOString().substr(11,12); const rest = Object.entries(e).filter(([k])=>!['t','coin','what'].includes(k)).map(([k,v])=>`${k}=${v}`).join(' '); return `<div><span style="color:var(--muted)">${t}</span> <b>${e.coin}</b> <span class="${e.what==='fill'?'pos':e.what==='rejected'?'neg':''}">${e.what}</span> ${rest}</div>`; }).join('');
+  if (!paramsLoaded && st.risk) loadParams();
+}
+tick(); setInterval(tick, 1500);
+</script>
+</body>
+</html>

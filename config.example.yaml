@@ -1,0 +1,75 @@
+# hl-mft config. Secrets (keys, tokens) come from .env / environment, never from here.
+# Stages: record (data only) -> paper (simulated fills on live feeds) -> live (real orders, micro size).
+mode: record
+state_db: data/state.db
+
+universe:
+  mode: dynamic            # dynamic: top_n by 24h volume/OI on HL; static: static_coins
+  static_coins: [ZEC, SOL, ETH]
+  top_n: 10
+  min_day_volume_usd: 20000000
+  max_tick_bps: 5.0        # skip coins whose price tick is coarser than this (spread cost)
+  blacklist_prefixes: ["xyz:", "@"]
+  blacklist: []
+  always_include: [ZEC]
+  refresh_hours: 24
+
+feeds:
+  hl_ws_url: wss://api.hyperliquid.xyz/ws
+  hl_info_url: https://api.hyperliquid.xyz/info
+  binance_enabled: true
+  lse_enabled: true
+  stale_after_s: 10
+
+features:
+  obi_levels: [1, 3, 5, 10, 20]
+  cvd_windows_s: [1, 5, 30]
+  zscore_window_s: 300
+  book_shape_dt_s: 2
+  vol_window_s: 60
+
+strategy:
+  weights: {obi_5: 0.8, obi_20: 0.4, microprice_bps: 0.6, cvd_5: 1.0, cvd_30: 0.5, leadlag_bps: 1.2, book_shape: 0.3}
+  z_clip: 4.0
+  theta_enter: 1.5         # |score| to enter (maker)
+  theta_taker: 3.0         # |score| to enter aggressively (IOC)
+  theta_exit: 0.3          # exit when score flips past -theta_exit
+  take_profit_bps: 8
+  stop_loss_vol_mult: 2.0  # stop = max(min_stop_bps, mult * realized vol bps)
+  min_stop_bps: 6
+  max_hold_s: 180
+  passive_ttl_s: 3
+  cooldown_s: 10
+  max_spread_bps: 6
+  require_ref: false       # require a fresh Binance/LSE reference tick to trade
+  exit_style: maker_then_taker
+  enabled_coins: []        # empty = all universe coins
+
+risk:
+  leverage: 5
+  isolated: true
+  risk_per_trade_pct: 2
+  max_positions: 10
+  max_gross_leverage: 8
+  daily_loss_stop_pct: 10
+  max_drawdown_stop_pct: 25
+  max_notional_per_position_usd: 50   # micro-live cap; raise only after paper/micro stage
+  min_notional_usd: 10.5              # HL minimum order is $10
+  max_actions_per_minute: 60
+  reconcile_interval_s: 5
+
+fees: {maker_bps: 1.5, taker_bps: 4.5}
+paper: {equity_start: 500, latency_ms: 60, taker_slippage_bps: 0.5}
+
+recorder:
+  enabled: true
+  root: data
+  flush_rows: 5000
+  flush_interval_s: 30
+  record_l2: true
+  record_trades: true
+  record_ref: true
+  record_features: true
+
+metrics: {port: 9108}
+dashboard: {enabled: true, host: 0.0.0.0, port: 8080}
