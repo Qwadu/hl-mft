@@ -80,6 +80,15 @@ class LiveBroker:
     def open_orders(self, coin: str) -> list[OpenOrder]:
         return list(self.orders.get(coin, {}).values())
 
+    async def quote(self, coin: str) -> tuple[float, float] | None:
+        try:
+            book = await self.info.l2_book(coin)
+            bids, asks = book["levels"]
+            return float(bids[0]["px"]), float(asks[0]["px"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("quote_failed", coin=coin, err=repr(e))
+            return None
+
     # -- orders --------------------------------------------------------------
     async def _ensure_leverage(self, coin: str) -> None:
         if coin in self._lev_set:

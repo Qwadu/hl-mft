@@ -24,6 +24,11 @@ def next_cid(prefix: str) -> str:
     return f"{prefix}-{next(_cid_seq)}"
 
 
+def fv_quote(fv: FeatureVector) -> tuple[float, float]:
+    half = fv.spread_bps / 2e4
+    return fv.mid * (1 - half), fv.mid * (1 + half)
+
+
 def compute_score(fv: FeatureVector, cfg: StrategyConfig) -> float:
     s = 0.0
     clip = cfg.z_clip
@@ -44,6 +49,7 @@ class CoinState:
     exit_cid: str = ""
     exit_taker: bool = False
     exit_deadline_ns: int = 0
+    exit_sent_ns: int = 0
     exit_reason: str = ""
     cooldown_until_ns: int = 0
     stop_bps: float = 0.0
@@ -239,26 +245,36 @@ class FlowStrategy:
             if not st.exit_taker and (urgent or (st.exit_deadline_ns and now >= st.exit_deadline_ns)):
                 await self.broker.cancel(fv.coin, st.exit_cid, "escalate")
                 st.exit_cid = ""
-                await self._send_exit(st, fv, side, abs(size), reason or st.exit_reason, taker=True)
+                await self._send_exit(
+                    st, fv_quote(fv), now, side, abs(size), reason or st.exit_reason, taker=True
+                )
             return
         if st.entry_cid:
             await self.broker.cancel(fv.coin, st.entry_cid, "in_position")
         if not reason:
             return
         taker = urgent or cfg.exit_style == "taker"
-        await self._send_exit(st, fv, side, abs(size), reason, taker=taker)
+        await self._send_exit(st, fv_quote(fv), now, side, abs(size), reason, taker=taker)
 
     async def _send_exit(
-        self, st: CoinState, fv: FeatureVector, side: int, sz: float, reason: str, taker: bool
-    ) -> None:
-        meta = self.metas.get(fv.coin)
+        self,
+        st: CoinState,
+        quote: tuple[float, float],
+        now: int,
+        side: int,
+        sz: float,
+        reason: str,
+        taker: bool,
+    ) -> bool:
+        meta = self.metas.get(st.coin)
         if meta is None:
-            return
+            self._log(st.coin, "exit_failed", reason=reason, err="no_meta")
+            return False
         if not self.risk.budget.take():
-            return
-        bid = fv.mid * (1 - fv.spread_bps / 2e4)
-        ask = fv.mid * (1 + fv.spread_bps / 2e4)
-        tick = px_tick(fv.mid, meta.sz_decimals)
+            self._log(st.coin, "exit_failed", reason=reason, err="rate_budget")
+            return False
+        bid, ask = quote
+        tick = px_tick((bid + ask) / 2, meta.sz_decimals)
         if taker:
             px = (bid - 5 * tick) if side > 0 else (ask + 5 * tick)
         else:
@@ -268,10 +284,11 @@ class FlowStrategy:
         st.exit_cid = cid
         st.exit_taker = taker
         st.exit_reason = reason
-        st.exit_deadline_ns = 0 if taker else fv.recv_ns + int(self.cfg.passive_ttl_s * 1e9)
-        st.cooldown_until_ns = fv.recv_ns + int(self.cfg.cooldown_s * 1e9)
+        st.exit_sent_ns = now
+        st.exit_deadline_ns = 0 if taker else now + int(self.cfg.passive_ttl_s * 1e9)
+        st.cooldown_until_ns = now + int(self.cfg.cooldown_s * 1e9)
         req = OrderRequest(
-            coin=fv.coin,
+            coin=st.coin,
             side=-side,
             sz=round_sz(sz, meta.sz_decimals),
             px=px,
@@ -281,19 +298,48 @@ class FlowStrategy:
             ttl_s=0.0 if taker else self.cfg.passive_ttl_s * 2,
             tag=f"exit:{reason}",
         )
-        self._log(fv.coin, "exit", reason=reason, kind=req.kind, px=px, sz=req.sz, score=round(st.score, 2))
+        self._log(st.coin, "exit", reason=reason, kind=req.kind, px=px, sz=req.sz, score=round(st.score, 2))
         if not await self.broker.place(req):
             st.exit_cid = ""
+            return False
+        return True
 
-    async def flatten_all(self, reason: str = "manual") -> None:
-        await self.broker.cancel_all(reason=reason)
-        for p in self.pf.open_positions():
-            st = self.state(p.coin)
-            fv = st.last_fv
-            if fv is None:
+    async def flatten_all(self, reason: str = "manual", retry_after_s: float = 5.0) -> list[str]:
+        """Taker-exit every open position; returns coins that could not be sent (caller must alert).
+
+        Works without feature state (falls back to the broker's quote) so reconciled positions in
+        coins outside the universe are covered. A taker exit already in flight is not re-sent until
+        `retry_after_s` has passed.
+        """
+        now = clock.now_ns()
+        failed: list[str] = []
+        positions = {p.coin: p for p in self.pf.open_positions()}
+        for coin in list(self.states):
+            if coin not in positions:
+                await self.broker.cancel_all(coin=coin, reason=reason)
+        for coin, p in positions.items():
+            st = self.state(coin)
+            inflight = bool(st.exit_cid) and st.exit_taker and now - st.exit_sent_ns < retry_after_s * 1e9
+            for o in self.broker.open_orders(coin):
+                if not (inflight and o.req.cid == st.exit_cid):
+                    await self.broker.cancel(coin, o.req.cid, reason)
+            if inflight:
                 continue
+            st.entry_cid = ""
             st.exit_cid = ""
-            await self._send_exit(st, fv, p.side, abs(p.size), reason, taker=True)
+            fv = st.last_fv
+            fresh = fv is not None and now - fv.recv_ns < 10e9
+            quote = fv_quote(fv) if fv is not None and fresh else await self.broker.quote(p.coin)
+            if quote is None:
+                self._log(p.coin, "exit_failed", reason=reason, err="no_quote")
+                failed.append(p.coin)
+                continue
+            if not await self._send_exit(st, quote, now, p.side, abs(p.size), reason, taker=True):
+                failed.append(p.coin)
+        if failed:
+            metrics.flatten_failures.inc(len(failed))
+            log.error("flatten_incomplete", reason=reason, coins=failed)
+        return failed
 
     def snapshot(self) -> dict[str, object]:
         out: dict[str, object] = {}

@@ -125,9 +125,8 @@ def build_app(app: App) -> FastAPI:
     async def kill() -> Any:
         if app.risk:
             app.risk.trip("manual")
-        if app.strategy:
-            await app.strategy.flatten_all("manual_kill")
-        return {"ok": True}
+        failed = await app.strategy.flatten_all("manual_kill") if app.strategy else []
+        return {"ok": not failed, "failed": failed}
 
     @api.post("/api/reset-kill", dependencies=[Depends(auth)])
     async def reset_kill() -> Any:
@@ -137,9 +136,8 @@ def build_app(app: App) -> FastAPI:
 
     @api.post("/api/flatten", dependencies=[Depends(auth)])
     async def flatten() -> Any:
-        if app.strategy:
-            await app.strategy.flatten_all("manual_flatten")
-        return {"ok": True}
+        failed = await app.strategy.flatten_all("manual_flatten") if app.strategy else []
+        return {"ok": not failed, "failed": failed}
 
     @api.post("/api/strategy/{state}", dependencies=[Depends(auth)])
     async def toggle(state: str) -> Any:

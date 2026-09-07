@@ -5,6 +5,7 @@ import contextlib
 import signal
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import metrics
 from .bus import EventBus
@@ -26,6 +27,9 @@ from .risk import RiskManager
 from .strategy.flow import FlowStrategy
 from .universe import fetch_universe
 
+if TYPE_CHECKING:
+    from .execution.live import LiveBroker
+
 log = get_logger(__name__)
 
 
@@ -45,6 +49,7 @@ class App:
         self.engine: FeatureEngine | None = None
         self.recorder: ParquetRecorder | None = None
         self.broker: Broker | None = None
+        self.live: LiveBroker | None = None
         self.pf: Portfolio | None = None
         self.risk: RiskManager | None = None
         self.strategy: FlowStrategy | None = None
@@ -58,6 +63,10 @@ class App:
         cfg = self.cfg
         metrics.serve(cfg.metrics.port)
         self.coins, self.metas = await fetch_universe(self.info, cfg.universe)
+        # trading state (incl. live reconciliation) comes first so coins with existing exposure are
+        # part of the universe before any feed subscribes and before the strategy sees an event
+        if cfg.mode in ("paper", "live"):
+            await self._setup_trading()
         metrics.universe_size.set(len(self.coins))
 
         self.bus.subscribe(L2Update, self._count_l2)
@@ -73,8 +82,8 @@ class App:
             cfg.feeds.hl_ws_url, self.bus, self.coins, user=user, stale_after_s=cfg.feeds.stale_after_s
         )
         self.feeds.append(self.hl)
-        if cfg.mode in ("paper", "live"):
-            await self._setup_trading()
+        if self.live:
+            self.hl.user_handlers.append(self.live.on_user_message)
         if cfg.feeds.binance_enabled:
             try:
                 avail = await available_symbols()
@@ -98,21 +107,25 @@ class App:
 
             if not self.secrets.hl_agent_private_key or not self.secrets.hl_account_address:
                 raise SystemExit("live mode requires HL_ACCOUNT_ADDRESS and HL_AGENT_PRIVATE_KEY")
-            live = LiveBroker(self.secrets, cfg, self.bus, self.info, self.metas)
-            eq = await live.account_value()
+            self.live = LiveBroker(self.secrets, cfg, self.bus, self.info, self.metas)
+            eq = await self.live.account_value()
             self.pf = Portfolio(equity_start=eq)
-            self.broker = live
+            self.broker = self.live
         assert self.pf is not None and self.broker is not None
         self.pf.roll_day()
         self.pf.peak_equity = self.pf.equity
         self.risk = RiskManager(cfg.risk, self.pf)
         self.strategy = FlowStrategy(cfg.strategy, self.bus, self.broker, self.pf, self.risk, self.metas)
-        if cfg.mode == "live":
-            from .execution.live import LiveBroker as _LB
-
-            assert isinstance(self.broker, _LB) and self.hl is not None
-            self.broker.attach(self.pf, self.strategy)
-            self.hl.user_handlers.append(self.broker.on_user_message)
+        if self.live:
+            self.live.attach(self.pf, self.strategy)
+            await self.live.reconcile()
+            held = [p.coin for p in self.pf.open_positions()]
+            for c in held:
+                if c not in self.coins:
+                    self.coins.append(c)
+            if held:
+                log.warning("startup_positions_imported", coins=held, equity=round(self.pf.equity, 2))
+            self.pf.peak_equity = self.pf.equity
 
     def _count_l2(self, e: L2Update) -> None:
         self._counts["l2"] += 1

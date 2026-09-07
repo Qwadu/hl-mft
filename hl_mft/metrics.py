@@ -36,6 +36,9 @@ account_value = Gauge(f"{NS}_account_value_usd", "Account value")
 orders_sent = Counter(f"{NS}_orders_sent_total", "Orders sent", ["coin", "kind"])
 orders_filled = Counter(f"{NS}_orders_filled_total", "Fills", ["coin", "maker"])
 orders_rejected = Counter(f"{NS}_orders_rejected_total", "Rejected orders", ["coin", "reason"])
+flatten_failures = Counter(
+    f"{NS}_flatten_failures_total", "Positions a flatten/kill could not send an exit for"
+)
 actions_budget_left = Gauge(f"{NS}_actions_budget_left", "Remaining action budget this minute")
 kill_switch = Gauge(f"{NS}_kill_switch", "1 if kill switch tripped")
 paper_trades = Counter(f"{NS}_paper_trades_total", "Paper trades", ["coin", "side"])

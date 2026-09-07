@@ -54,6 +54,12 @@ class PaperBroker:
             b = self.books[coin] = OrderBook(coin)
         return b
 
+    async def quote(self, coin: str) -> tuple[float, float] | None:
+        b = self.books.get(coin)
+        if b is None or not b.ready:
+            return None
+        return b.best_bid.px, b.best_ask.px
+
     async def place(self, req: OrderRequest) -> bool:
         now = clock.now_ns()
         book = self._book(req.coin)
