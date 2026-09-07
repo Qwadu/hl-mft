@@ -26,6 +26,9 @@ class ParamUpdate(BaseModel):
 
 def build_app(app: App) -> FastAPI:
     token = app.secrets.dashboard_token
+    if token in ("", "change-me") and app.cfg.mode == "live":
+        log.error("dashboard_token_default_in_live", token=token)
+        token = ""
 
     def auth(request: Request) -> None:
         supplied = (
@@ -33,7 +36,7 @@ def build_app(app: App) -> FastAPI:
             or request.query_params.get("token")
             or request.cookies.get("token")
         )
-        if not supplied or not pysecrets.compare_digest(supplied, token):
+        if not supplied or not token or not pysecrets.compare_digest(supplied, token):
             raise HTTPException(status_code=401, detail="bad token")
 
     api = FastAPI(title="hl-mft", docs_url=None, redoc_url=None)
@@ -60,6 +63,7 @@ def build_app(app: App) -> FastAPI:
 
     @api.get("/api/events", dependencies=[Depends(auth)])
     async def events(n: int = 100) -> Any:
+        n = max(0, min(n, 5000))
         return app.strategy.events[-n:] if app.strategy else []
 
     @api.get("/api/orders", dependencies=[Depends(auth)])
@@ -94,15 +98,14 @@ def build_app(app: App) -> FastAPI:
 
     @api.post("/api/params", dependencies=[Depends(auth)])
     async def set_params(upd: ParamUpdate) -> Any:
-        new_strat = app.cfg.strategy.model_copy(update=upd.strategy)
-        new_risk = app.cfg.risk.model_copy(update=upd.risk)
-        type(app.cfg.strategy).model_validate(new_strat.model_dump())
-        type(app.cfg.risk).model_validate(new_risk.model_dump())
-        for k, v in upd.strategy.items():
-            setattr(app.cfg.strategy, k, v)
-        for k, v in upd.risk.items():
-            setattr(app.cfg.risk, k, v)
+        new_strat = type(app.cfg.strategy).model_validate(
+            app.cfg.strategy.model_copy(update=upd.strategy).model_dump()
+        )
+        new_risk = type(app.cfg.risk).model_validate(app.cfg.risk.model_copy(update=upd.risk).model_dump())
+        app.cfg.strategy = new_strat
+        app.cfg.risk = new_risk
         if app.risk:
+            app.risk.cfg = new_risk
             app.risk.budget.per_minute = app.cfg.risk.max_actions_per_minute
         if upd.persist and app.config_path:
             app.cfg.dump(app.config_path)
