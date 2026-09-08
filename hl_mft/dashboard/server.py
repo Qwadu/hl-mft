@@ -104,9 +104,12 @@ def build_app(app: App) -> FastAPI:
         new_risk = type(app.cfg.risk).model_validate(app.cfg.risk.model_copy(update=upd.risk).model_dump())
         app.cfg.strategy = new_strat
         app.cfg.risk = new_risk
+        if app.strategy:
+            app.strategy.cfg = new_strat
         if app.risk:
             app.risk.cfg = new_risk
-            app.risk.budget.per_minute = app.cfg.risk.max_actions_per_minute
+            app.risk.budget.per_minute = new_risk.max_actions_per_minute
+            app.risk.budget.reserve = new_risk.emergency_actions_reserve
         if upd.persist and app.config_path:
             app.cfg.dump(app.config_path)
         log.info("params_updated", strategy=upd.strategy, risk=upd.risk, persist=upd.persist)

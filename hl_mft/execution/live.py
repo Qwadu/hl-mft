@@ -22,9 +22,24 @@ from .base import OpenOrder
 
 if TYPE_CHECKING:
     from ..portfolio import Portfolio
+    from ..risk import ActionBudget
     from ..strategy.flow import FlowStrategy
 
 log = get_logger(__name__)
+
+# cancel reasons that reduce risk and may dip into the emergency part of the action budget
+EMERGENCY_CANCEL_REASONS = frozenset(
+    {
+        "kill_switch",
+        "manual_kill",
+        "manual_flatten",
+        "manual",
+        "stale_feed",
+        "shutdown",
+        "escalate",
+        "in_position",
+    }
+)
 
 
 def to_cloid(cid: str) -> Cloid:
@@ -42,20 +57,29 @@ class LiveBroker:
     """
 
     def __init__(
-        self, secrets: Secrets, cfg: AppConfig, bus: EventBus, info: HLInfo, metas: dict[str, PerpMeta]
+        self,
+        secrets: Secrets,
+        cfg: AppConfig,
+        bus: EventBus,
+        info: HLInfo,
+        metas: dict[str, PerpMeta],
+        exchange: Exchange | None = None,
     ) -> None:
         self.cfg = cfg
         self.bus = bus
         self.info = info
         self.metas = metas
         self.address = secrets.hl_account_address
-        wallet = Account.from_key(secrets.hl_agent_private_key)
-        base = constants.TESTNET_API_URL if secrets.hl_testnet else constants.MAINNET_API_URL
-        self.ex = Exchange(wallet, base, account_address=self.address)
+        if exchange is None:
+            wallet = Account.from_key(secrets.hl_agent_private_key)
+            base = constants.TESTNET_API_URL if secrets.hl_testnet else constants.MAINNET_API_URL
+            exchange = Exchange(wallet, base, account_address=self.address)
+        self.ex = exchange
         self.orders: dict[str, dict[str, OpenOrder]] = {}
         self.cloid_to_cid: dict[str, str] = {}
         self.pf: Portfolio | None = None
         self.strategy: FlowStrategy | None = None
+        self.budget: ActionBudget | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._lev_set: set[str] = set()
         self.last_reconcile: dict[str, Any] = {}
@@ -63,6 +87,7 @@ class LiveBroker:
     def attach(self, pf: Portfolio, strategy: FlowStrategy) -> None:
         self.pf = pf
         self.strategy = strategy
+        self.budget = strategy.risk.budget
 
     # -- lifecycle -----------------------------------------------------------
     async def start(self) -> None:
@@ -90,20 +115,31 @@ class LiveBroker:
             return None
 
     # -- orders --------------------------------------------------------------
-    async def _ensure_leverage(self, coin: str) -> None:
+    async def _ensure_leverage(self, coin: str) -> bool:
+        """Set leverage/margin mode once per coin; False (and retried next order) if the exchange refused."""
         if coin in self._lev_set:
-            return
+            return True
         meta = self.metas.get(coin)
         lev = min(self.cfg.risk.leverage, meta.max_leverage if meta else self.cfg.risk.leverage)
+        if self.budget is not None and not self.budget.take():
+            metrics.actions_deferred.labels(kind="leverage").inc()
+            return False
         try:
             r = await asyncio.to_thread(self.ex.update_leverage, lev, coin, not self.cfg.risk.isolated)
-            log.info("leverage_set", coin=coin, leverage=lev, isolated=self.cfg.risk.isolated, resp=r)
         except Exception as e:  # noqa: BLE001
             log.warning("leverage_set_failed", coin=coin, err=repr(e))
+            return False
+        if not isinstance(r, dict) or r.get("status") != "ok":
+            log.warning("leverage_set_failed", coin=coin, resp=str(r)[:160])
+            return False
+        log.info("leverage_set", coin=coin, leverage=lev, isolated=self.cfg.risk.isolated)
         self._lev_set.add(coin)
+        return True
 
     async def place(self, req: OrderRequest) -> bool:
-        await self._ensure_leverage(req.coin)
+        if not req.reduce_only and not await self._ensure_leverage(req.coin):
+            await self._emit(req, "rejected", "leverage_not_set")
+            return False
         cloid = to_cloid(req.cid)
         self.cloid_to_cid[cloid.to_raw()] = req.cid
         tif = "Alo" if req.kind == "maker" else "Ioc"
@@ -156,6 +192,10 @@ class LiveBroker:
     async def cancel(self, coin: str, cid: str, reason: str = "cancel") -> bool:
         o = self.orders.get(coin, {}).get(cid)
         if o is None:
+            return False
+        if self.budget is not None and not self.budget.take(emergency=reason in EMERGENCY_CANCEL_REASONS):
+            metrics.actions_deferred.labels(kind="cancel").inc()
+            log.debug("cancel_deferred", coin=coin, cid=cid, reason=reason)
             return False
         try:
             resp = await asyncio.to_thread(self.ex.cancel_by_cloid, coin, to_cloid(cid))

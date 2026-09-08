@@ -40,6 +40,9 @@ flatten_failures = Counter(
     f"{NS}_flatten_failures_total", "Positions a flatten/kill could not send an exit for"
 )
 actions_budget_left = Gauge(f"{NS}_actions_budget_left", "Remaining action budget this minute")
+actions_deferred = Counter(
+    f"{NS}_actions_deferred_total", "Exchange actions skipped for lack of budget", ["kind"]
+)
 kill_switch = Gauge(f"{NS}_kill_switch", "1 if kill switch tripped")
 paper_trades = Counter(f"{NS}_paper_trades_total", "Paper trades", ["coin", "side"])
 paper_pnl = Gauge(f"{NS}_paper_pnl_usd_total", "Paper realized PnL after fees")

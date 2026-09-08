@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml   # rw: dashboard "persist" writes back here
       - ./data:/app/data
     ports:
       - "127.0.0.1:8080:8080"   # dashboard: reach it over an SSH tunnel, never expose publicly

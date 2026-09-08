@@ -12,10 +12,15 @@ log = get_logger(__name__)
 
 
 class ActionBudget:
-    """Sliding-window limiter on exchange actions (orders/cancels) per minute."""
+    """Sliding-window limiter on exchange actions (orders/cancels) per minute.
 
-    def __init__(self, per_minute: int) -> None:
+    `reserve` actions per minute are kept back for emergency use (kill / flatten / stale-feed
+    cancels), which take with `emergency=True` and may use the whole window.
+    """
+
+    def __init__(self, per_minute: int, reserve: int = 0) -> None:
         self.per_minute = per_minute
+        self.reserve = reserve
         self._q: deque[float] = deque()
 
     def _prune(self) -> None:
@@ -29,8 +34,8 @@ class ActionBudget:
         metrics.actions_budget_left.set(n)
         return n
 
-    def take(self, n: int = 1) -> bool:
-        if self.left() < n:
+    def take(self, n: int = 1, emergency: bool = False) -> bool:
+        if self.left() - (0 if emergency else self.reserve) < n:
             return False
         now = time.monotonic()
         for _ in range(n):
@@ -45,7 +50,14 @@ class RiskManager:
         self.killed = False
         self.kill_reason = ""
         self.paused = False  # manual pause from dashboard: no new entries, exits allowed
-        self.budget = ActionBudget(cfg.max_actions_per_minute)
+        self.budget = ActionBudget(cfg.max_actions_per_minute, cfg.emergency_actions_reserve)
+        self.pending: dict[str, float] = {}  # coin -> worst-case notional of an unfilled entry
+
+    def reserve(self, coin: str, notional: float) -> None:
+        self.pending[coin] = notional
+
+    def release(self, coin: str) -> None:
+        self.pending.pop(coin, None)
 
     def trip(self, reason: str) -> None:
         if not self.killed:
@@ -75,10 +87,13 @@ class RiskManager:
         if self.paused:
             return False, "paused"
         pf = self.pf
-        if len(pf.open_positions()) >= self.cfg.max_positions:
+        held = {p.coin for p in pf.open_positions()}
+        n_slots = len(held | {c for c in self.pending if c != coin})
+        if n_slots >= self.cfg.max_positions:
             return False, "max_positions"
+        pending_ntl = sum(v for c, v in self.pending.items() if c != coin)
         if (
-            pf.gross_notional + self.cfg.max_notional_per_position_usd
+            pf.gross_notional + pending_ntl + self.cfg.max_notional_per_position_usd
             > self.cfg.max_gross_leverage * pf.equity
         ):
             return False, "gross_leverage"

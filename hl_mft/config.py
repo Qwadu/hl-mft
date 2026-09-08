@@ -93,6 +93,7 @@ class RiskConfig(BaseModel):
     max_notional_per_position_usd: float = 50.0
     min_notional_usd: float = 10.5
     max_actions_per_minute: int = 60
+    emergency_actions_reserve: int = 15  # part of the budget only kill/flatten/stale cancels may use
     reconcile_interval_s: float = 5.0
 
 
@@ -115,6 +116,7 @@ class RecorderConfig(BaseModel):
     root: Path = Path("data")
     flush_rows: int = 5_000
     flush_interval_s: float = 30.0
+    max_pending_batches: int = 20  # rows kept in memory after failed flushes before the oldest are dropped
     record_l2: bool = True
     record_trades: bool = True
     record_ref: bool = True

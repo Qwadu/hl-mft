@@ -56,6 +56,7 @@ risk:
   max_notional_per_position_usd: 50   # micro-live cap; raise only after paper/micro stage
   min_notional_usd: 10.5              # HL minimum order is $10
   max_actions_per_minute: 60
+  emergency_actions_reserve: 15   # kept for kill/flatten/stale-feed cancels; entries and TTL cancels stop before it
   reconcile_interval_s: 5
 
 # Base tier-0 fees; staking >10 HYPE gives 5% off (up to 40% at Diamond) — adjust after checking your tier.

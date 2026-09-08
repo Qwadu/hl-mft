@@ -109,6 +109,7 @@ class FlowStrategy:
         if e.status in ("filled", "cancelled", "expired", "rejected"):
             if e.cid == st.entry_cid:
                 st.entry_cid = ""
+                self.risk.release(e.coin)
                 if e.status != "filled":
                     st.cooldown_until_ns = e.recv_ns + int(self.cfg.cooldown_s * 1e9 / 2)
             elif e.cid == st.exit_cid:
@@ -187,6 +188,7 @@ class FlowStrategy:
         cid = next_cid("e")
         st.entry_cid = cid
         st.stop_bps = stop_bps
+        self.risk.reserve(fv.coin, sz * px)
         req = OrderRequest(
             coin=fv.coin,
             side=side,
@@ -211,6 +213,7 @@ class FlowStrategy:
         )
         if not await self.broker.place(req):
             st.entry_cid = ""
+            self.risk.release(fv.coin)
 
     def _pending_side(self, st: CoinState) -> int:
         for o in self.broker.open_orders(st.coin):
@@ -270,7 +273,7 @@ class FlowStrategy:
         if meta is None:
             self._log(st.coin, "exit_failed", reason=reason, err="no_meta")
             return False
-        if not self.risk.budget.take():
+        if not self.risk.budget.take(emergency=taker):
             self._log(st.coin, "exit_failed", reason=reason, err="rate_budget")
             return False
         bid, ask = quote
@@ -327,6 +330,7 @@ class FlowStrategy:
                 continue
             st.entry_cid = ""
             st.exit_cid = ""
+            self.risk.release(coin)
             fv = st.last_fv
             fresh = fv is not None and now - fv.recv_ns < 10e9
             quote = fv_quote(fv) if fv is not None and fresh else await self.broker.quote(p.coin)

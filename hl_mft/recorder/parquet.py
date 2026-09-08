@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -88,7 +89,9 @@ class _Table:
         self.name = name
         self.schema = schema
         self.rows: list[dict[str, Any]] = []
+        self.lock = threading.Lock()
         self.written = 0
+        self.dropped = 0
 
 
 class ParquetRecorder:
@@ -199,25 +202,39 @@ class ParquetRecorder:
 
     def _add(self, table: str, row: dict[str, Any]) -> None:
         t = self.tables[table]
-        t.rows.append(row)
-        if len(t.rows) >= self.cfg.flush_rows:
+        with t.lock:
+            t.rows.append(row)
+            full = len(t.rows) >= self.cfg.flush_rows
+        if full:
             self._flush_table(t)
 
     # -- flushing ------------------------------------------------------------
     def _flush_table(self, t: _Table) -> None:
-        if not t.rows:
-            return
-        rows, t.rows = t.rows, []
-        now = datetime.now(UTC)
-        d = self.root / t.name / f"date={now:%Y-%m-%d}" / f"hour={now:%H}"
-        d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{int(time.time() * 1000)}.parquet"
+        """Write the buffered batch; on failure the rows go back to the front of the buffer (bounded)."""
+        with t.lock:
+            if not t.rows:
+                return
+            rows, t.rows = t.rows, []
         try:
+            now = datetime.now(UTC)
+            d = self.root / t.name / f"date={now:%Y-%m-%d}" / f"hour={now:%H}"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / f"{time.time_ns() // 1000}.parquet"
             tbl = pa.Table.from_pylist(rows, schema=t.schema) if t.schema else pa.Table.from_pylist(rows)
             pq.write_table(tbl, path, compression="zstd")
             t.written += len(rows)
         except Exception:  # noqa: BLE001
-            log.exception("parquet_flush_failed", table=t.name, rows=len(rows))
+            with t.lock:
+                cap = self.cfg.flush_rows * self.cfg.max_pending_batches
+                overflow = len(rows) + len(t.rows) - cap
+                if overflow > 0:
+                    rows = rows[overflow:]
+                    t.dropped += overflow
+                t.rows[:0] = rows
+                pending = len(t.rows)
+            log.exception(
+                "parquet_flush_failed", table=t.name, rows=len(rows), pending=pending, dropped=t.dropped
+            )
 
     def flush_all(self) -> None:
         for t in self.tables.values():

@@ -33,11 +33,29 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
+TESTNET_WS_URL = "wss://api.hyperliquid-testnet.xyz/ws"
+TESTNET_INFO_URL = "https://api.hyperliquid-testnet.xyz/info"
+
+
 class App:
+    def _select_network(self) -> None:
+        """Keep market data, info and signing on the same network as HL_TESTNET says."""
+        feeds = self.cfg.feeds
+        if self.secrets.hl_testnet:
+            if feeds.hl_ws_url != TESTNET_WS_URL or feeds.hl_info_url != TESTNET_INFO_URL:
+                log.warning("hl_testnet_override_urls", ws=TESTNET_WS_URL, info=TESTNET_INFO_URL)
+            feeds.hl_ws_url = TESTNET_WS_URL
+            feeds.hl_info_url = TESTNET_INFO_URL
+        elif self.cfg.mode == "live" and ("testnet" in feeds.hl_ws_url or "testnet" in feeds.hl_info_url):
+            raise SystemExit(
+                "feeds point at testnet but HL_TESTNET is not set; refusing to sign mainnet orders"
+            )
+
     def __init__(self, cfg: AppConfig, secrets: Secrets, config_path: Path | None = None) -> None:
         self.cfg = cfg
         self.secrets = secrets
         self.config_path = config_path
+        self._select_network()
         self.bus = EventBus()
         self.info = HLInfo(cfg.feeds.hl_info_url)
         self.coins: list[str] = []
