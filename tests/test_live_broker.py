@@ -42,7 +42,9 @@ def mk(per_minute: int = 5, reserve: int = 2) -> tuple[LiveBroker, FakeExchange,
     bus = EventBus()
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, events.append)
-    cfg = AppConfig(mode="live", risk=RiskConfig(max_actions_per_minute=per_minute))
+    cfg = AppConfig(
+        mode="live", risk=RiskConfig(max_actions_per_minute=per_minute, emergency_actions_reserve=reserve)
+    )
     ex = FakeExchange()
     b = LiveBroker(
         Secrets(hl_account_address="0xabc"), cfg, bus, HLInfo(cfg.feeds.hl_info_url), {"A": meta("A")}, ex

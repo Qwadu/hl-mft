@@ -163,8 +163,7 @@ class FlowStrategy:
         meta = self.metas.get(fv.coin)
         if meta is None:
             return
-        rv = fv.values.get("rv_bps", 0.0)
-        stop_bps = max(cfg.stop_loss_vol_mult * rv, cfg.min_stop_bps)
+        stop_bps = self._stop_bps(fv)
         ntl = self.risk.size_notional(fv.mid, stop_bps)
         if ntl <= 0:
             return
@@ -215,6 +214,9 @@ class FlowStrategy:
             st.entry_cid = ""
             self.risk.release(fv.coin)
 
+    def _stop_bps(self, fv: FeatureVector) -> float:
+        return max(self.cfg.stop_loss_vol_mult * fv.values.get("rv_bps", 0.0), self.cfg.min_stop_bps)
+
     def _pending_side(self, st: CoinState) -> int:
         for o in self.broker.open_orders(st.coin):
             if o.req.cid == st.entry_cid:
@@ -230,11 +232,15 @@ class FlowStrategy:
         now = fv.recv_ns
         pnl_bps = side * (fv.mid - entry) / entry * 1e4
         held_s = (now - opened_ns) / 1e9 if opened_ns else 0.0
+        if st.stop_bps <= 0:
+            # position not opened by this process (reconciled / external fill): give it a stop now
+            st.stop_bps = self._stop_bps(fv)
+            self._log(fv.coin, "stop_assigned", stop_bps=round(st.stop_bps, 1), size=size, entry=entry)
         reason = ""
         urgent = False
         if self.risk.killed:
             reason, urgent = "kill_switch", True
-        elif pnl_bps <= -st.stop_bps and st.stop_bps > 0:
+        elif pnl_bps <= -st.stop_bps:
             reason, urgent = "stop", True
         elif held_s >= cfg.max_hold_s:
             reason, urgent = "max_hold", True

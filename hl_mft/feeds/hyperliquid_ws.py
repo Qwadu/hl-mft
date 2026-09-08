@@ -34,6 +34,19 @@ class HyperliquidFeed(ReconnectingWsFeed):
         self.user = user
         self.msg_count = 0
         self.user_handlers: list[Any] = []
+        self._coin_data_ns: dict[str, int] = {}
+
+    def _mark_coin(self, coin: str) -> None:
+        self.mark_data()
+        self._coin_data_ns[coin] = self.last_data_ns
+
+    def stale_coins(self) -> list[str]:
+        """Subscribed coins with no book/bbo/trade for `stale_after_s` (from connect time if never seen)."""
+        if self.last_data_ns == 0:
+            return list(self.coins)
+        now = time.monotonic_ns()
+        lim = self.stale_after_s * 1e9
+        return [c for c in self.coins if now - self._coin_data_ns.get(c, self._connect_ns) > lim]
 
     # -- subscriptions -------------------------------------------------------
     def _subs_for(self, coin: str) -> list[dict[str, Any]]:
@@ -86,6 +99,7 @@ class HyperliquidFeed(ReconnectingWsFeed):
         data = msg.get("data")
         self.msg_count += 1
         if ch == "l2Book":
+            self._mark_coin(data["coin"])
             lv = data["levels"]
             await self.bus.publish(
                 L2Update(
@@ -98,6 +112,7 @@ class HyperliquidFeed(ReconnectingWsFeed):
             )
         elif ch == "trades":
             for t in data:
+                self._mark_coin(t["coin"])
                 users = t.get("users") or ["", ""]
                 await self.bus.publish(
                     Trade(
@@ -116,6 +131,7 @@ class HyperliquidFeed(ReconnectingWsFeed):
             b, a = data["bbo"]
             if b is None or a is None:
                 return
+            self._mark_coin(data["coin"])
             await self.bus.publish(
                 Bbo(
                     coin=data["coin"],

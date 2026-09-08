@@ -78,6 +78,7 @@ class LSEFeed(ReconnectingWsFeed):
             except ValueError:
                 ts_ms = 0
         self.msg_count += 1
+        self.mark_data()
         await self.bus.publish(
             RefTick(source="lse", coin=coin, recv_ns=recv_ns, bid=float(bid), ask=float(ask), ts_ms=ts_ms)
         )

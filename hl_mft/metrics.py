@@ -39,6 +39,9 @@ orders_rejected = Counter(f"{NS}_orders_rejected_total", "Rejected orders", ["co
 flatten_failures = Counter(
     f"{NS}_flatten_failures_total", "Positions a flatten/kill could not send an exit for"
 )
+orphan_orders_cancelled = Counter(
+    f"{NS}_orphan_orders_cancelled_total", "Exchange orders with a cloid unknown to this process cancelled"
+)
 actions_budget_left = Gauge(f"{NS}_actions_budget_left", "Remaining action budget this minute")
 actions_deferred = Counter(
     f"{NS}_actions_deferred_total", "Exchange actions skipped for lack of budget", ["kind"]

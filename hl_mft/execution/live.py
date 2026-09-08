@@ -42,9 +42,16 @@ EMERGENCY_CANCEL_REASONS = frozenset(
 )
 
 
+CLOID_PREFIX = "0x686c6d6674"  # "hlmft": marks orders as ours so orphan cleanup never touches other clients
+
+
 def to_cloid(cid: str) -> Cloid:
-    h = hashlib.sha1(cid.encode()).hexdigest()[:32]
-    return Cloid("0x" + h)
+    h = hashlib.sha1(cid.encode()).hexdigest()
+    return Cloid(CLOID_PREFIX + h[: 34 - len(CLOID_PREFIX)])
+
+
+def is_our_cloid(cl: str) -> bool:
+    return cl.lower().startswith(CLOID_PREFIX)
 
 
 class LiveBroker:
@@ -287,6 +294,41 @@ class LiveBroker:
             except Exception as e:  # noqa: BLE001
                 log.warning("reconcile_failed", err=repr(e))
 
+    async def _cancel_orphans(self, exchange_orders: list[dict[str, Any]]) -> int:
+        """Cancel resting orders with our cloid prefix that this process did not issue.
+
+        Such an order was left behind by a previous (crashed / restarted) instance; its intent is lost,
+        so it must not stay live where a later fill would bypass risk, flatten and cancel_all. Orders
+        without a cloid (manual UI) or with a foreign cloid (other clients) are left alone.
+        """
+        n = 0
+        for o in exchange_orders:
+            cl = o.get("cloid")
+            coin = o.get("coin")
+            if not cl or not coin or not is_our_cloid(cl) or cl in self.cloid_to_cid:
+                continue
+            if self.budget is not None and not self.budget.take(emergency=True):
+                metrics.actions_deferred.labels(kind="orphan_cancel").inc()
+                log.warning("orphan_cancel_deferred", coin=coin, cloid=cl)
+                break
+            try:
+                resp = await asyncio.to_thread(self.ex.cancel_by_cloid, coin, Cloid(cl))
+            except Exception as e:  # noqa: BLE001
+                log.warning("orphan_cancel_failed", coin=coin, cloid=cl, err=repr(e))
+                continue
+            st = self._first_status(resp)
+            ok = resp.get("status") == "ok" and (st is None or "error" not in st)
+            log.warning(
+                "orphan_order_cancelled" if ok else "orphan_cancel_noop",
+                coin=coin,
+                cloid=cl,
+                oid=o.get("oid"),
+            )
+            if ok:
+                n += 1
+                metrics.orphan_orders_cancelled.inc()
+        return n
+
     async def reconcile(self) -> None:
         if self.pf is None:
             return
@@ -315,6 +357,7 @@ class LiveBroker:
                 if age_s > 3.0 and to_cloid(o.req.cid).to_raw() not in ex_cloids:
                     self.orders[coin].pop(o.req.cid, None)
                     await self._emit(o.req, "cancelled", "reconcile_missing")
+        await self._cancel_orphans(oo)
         self.pf.sync_equity(float(st["marginSummary"]["accountValue"]))
         self.last_reconcile = {
             "t": time.time(),

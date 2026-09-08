@@ -21,7 +21,9 @@ class ReconnectingWsFeed(ABC):
     def __init__(self, url: str, stale_after_s: float = 10.0) -> None:
         self.url = url
         self.stale_after_s = stale_after_s
-        self.last_msg_ns = 0
+        self.last_msg_ns = 0  # any frame (diagnostics)
+        self.last_data_ns = 0  # actionable market data only; drives `stale`
+        self._connect_ns = 0
         self.connected = False
         self.reconnects = 0
         self._stop = asyncio.Event()
@@ -44,11 +46,15 @@ class ReconnectingWsFeed(ABC):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
+    def mark_data(self) -> None:
+        """Subclasses call this for price-bearing messages; pongs, acks, user/context frames must not."""
+        self.last_data_ns = time.monotonic_ns()
+
     @property
     def stale(self) -> bool:
-        if self.last_msg_ns == 0:
+        if self.last_data_ns == 0:
             return True
-        return (time.monotonic_ns() - self.last_msg_ns) / 1e9 > self.stale_after_s
+        return (time.monotonic_ns() - self.last_data_ns) / 1e9 > self.stale_after_s
 
     # -- to implement --------------------------------------------------------
     @abstractmethod
@@ -71,7 +77,8 @@ class ReconnectingWsFeed(ABC):
                 ) as ws:
                     self._ws = ws
                     self.connected = True
-                    self.last_msg_ns = time.monotonic_ns()
+                    # grace until first tick
+                    self._connect_ns = self.last_msg_ns = self.last_data_ns = time.monotonic_ns()
                     log.info("ws_connected", feed=self.name, url=self.url)
                     await self.on_connect(ws)
                     backoff = 0.5

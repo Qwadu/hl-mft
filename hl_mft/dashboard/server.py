@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..logging_setup import get_logger
 
@@ -98,10 +98,19 @@ def build_app(app: App) -> FastAPI:
 
     @api.post("/api/params", dependencies=[Depends(auth)])
     async def set_params(upd: ParamUpdate) -> Any:
-        new_strat = type(app.cfg.strategy).model_validate(
-            app.cfg.strategy.model_copy(update=upd.strategy).model_dump()
-        )
-        new_risk = type(app.cfg.risk).model_validate(app.cfg.risk.model_copy(update=upd.risk).model_dump())
+        unknown = [k for k in upd.strategy if k not in type(app.cfg.strategy).model_fields] + [
+            k for k in upd.risk if k not in type(app.cfg.risk).model_fields
+        ]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"unknown params: {unknown}")
+        try:
+            # full re-validation: Field bounds + cross-field validators apply to runtime edits too
+            new_strat = type(app.cfg.strategy).model_validate(
+                {**app.cfg.strategy.model_dump(), **upd.strategy}
+            )
+            new_risk = type(app.cfg.risk).model_validate({**app.cfg.risk.model_dump(), **upd.risk})
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=e.errors(include_url=False)) from None
         app.cfg.strategy = new_strat
         app.cfg.risk = new_risk
         if app.strategy:

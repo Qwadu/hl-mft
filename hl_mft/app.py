@@ -24,6 +24,7 @@ from .logging_setup import get_logger
 from .portfolio import Portfolio
 from .recorder.parquet import ParquetRecorder
 from .risk import RiskManager
+from .state import StateStore
 from .strategy.flow import FlowStrategy
 from .universe import fetch_universe
 
@@ -117,6 +118,7 @@ class App:
 
     async def _setup_trading(self) -> None:
         cfg = self.cfg
+        store: StateStore | None = None
         if cfg.mode == "paper":
             self.pf = Portfolio(equity_start=cfg.paper.equity_start)
             self.broker = PaperBroker(cfg.paper, cfg.fees, self.bus)
@@ -129,10 +131,12 @@ class App:
             eq = await self.live.account_value()
             self.pf = Portfolio(equity_start=eq)
             self.broker = self.live
+            net = "testnet" if self.secrets.hl_testnet else "mainnet"
+            # daily anchor / high-water mark / kill state survive restarts; keyed per account+network
+            store = StateStore(cfg.state_db, f"live:{net}:{self.secrets.hl_account_address.lower()}")
         assert self.pf is not None and self.broker is not None
         self.pf.roll_day()
-        self.pf.peak_equity = self.pf.equity
-        self.risk = RiskManager(cfg.risk, self.pf)
+        self.risk = RiskManager(cfg.risk, self.pf, store)
         self.strategy = FlowStrategy(cfg.strategy, self.bus, self.broker, self.pf, self.risk, self.metas)
         if self.live:
             self.live.attach(self.pf, self.strategy)
@@ -143,7 +147,7 @@ class App:
                     self.coins.append(c)
             if held:
                 log.warning("startup_positions_imported", coins=held, equity=round(self.pf.equity, 2))
-            self.pf.peak_equity = self.pf.equity
+            self.risk.check_limits()
 
     def _count_l2(self, e: L2Update) -> None:
         self._counts["l2"] += 1
@@ -193,6 +197,8 @@ class App:
             await self.broker.stop()
         if self.recorder:
             await self.recorder.stop()
+        if self.risk and self.risk.store:
+            self.risk.store.close()
         await self.info.close()
         log.info("app_stopped")
 
@@ -212,11 +218,17 @@ class App:
             if self.risk and self.pf:
                 self.risk.check_limits()
                 self.pf.publish_metrics()
-                if self.hl and self.hl.stale and self.cfg.mode == "live" and self.broker:
-                    # dead-man: no market data -> pull all resting orders
-                    n = await self.broker.cancel_all(reason="stale_feed")
-                    if n:
-                        log.warning("stale_feed_cancelled_orders", n=n)
+                if self.hl and self.cfg.mode == "live" and self.broker:
+                    # dead-man: no market data -> pull resting orders (whole feed, or per silent coin)
+                    if self.hl.stale:
+                        n = await self.broker.cancel_all(reason="stale_feed")
+                        if n:
+                            log.warning("stale_feed_cancelled_orders", n=n)
+                    else:
+                        for c in self.hl.stale_coins():
+                            n = await self.broker.cancel_all(c, reason="stale_feed")
+                            if n:
+                                log.warning("stale_coin_cancelled_orders", coin=c, n=n)
                 if self.risk.killed and self.strategy:
                     await self.strategy.flatten_all("kill_switch")
 

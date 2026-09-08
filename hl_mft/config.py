@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["record", "paper", "live"]
@@ -66,35 +66,53 @@ class StrategyConfig(BaseModel):
             "book_shape": 0.3,
         }
     )
-    z_clip: float = 4.0
-    theta_enter: float = 1.5
-    theta_taker: float = 3.0
-    theta_exit: float = 0.3
-    take_profit_bps: float = 8.0
-    stop_loss_vol_mult: float = 2.0
-    min_stop_bps: float = 6.0
-    max_hold_s: float = 180.0
-    passive_ttl_s: float = 3.0
-    cooldown_s: float = 10.0
-    max_spread_bps: float = 6.0
+    # bounds matter: these fields are editable at runtime from the dashboard (/api/params)
+    z_clip: float = Field(default=4.0, gt=0, le=20)
+    theta_enter: float = Field(default=1.5, gt=0, le=50)
+    theta_taker: float = Field(default=3.0, gt=0, le=100)
+    theta_exit: float = Field(default=0.3, ge=0, le=50)
+    take_profit_bps: float = Field(default=8.0, gt=0, le=1000)
+    stop_loss_vol_mult: float = Field(default=2.0, ge=0, le=20)
+    min_stop_bps: float = Field(default=6.0, gt=0, le=500)
+    max_hold_s: float = Field(default=180.0, gt=0, le=86_400)
+    passive_ttl_s: float = Field(default=3.0, gt=0, le=300)
+    cooldown_s: float = Field(default=10.0, ge=0, le=3600)
+    max_spread_bps: float = Field(default=6.0, gt=0, le=200)
     require_ref: bool = False
     exit_style: Literal["taker", "maker_then_taker"] = "maker_then_taker"
     enabled_coins: list[str] = Field(default_factory=list)  # empty = all universe
 
+    @model_validator(mode="after")
+    def _ordered_thresholds(self) -> StrategyConfig:
+        if not self.theta_exit < self.theta_enter <= self.theta_taker:
+            raise ValueError("need theta_exit < theta_enter <= theta_taker")
+        return self
+
 
 class RiskConfig(BaseModel):
-    leverage: int = 5
+    leverage: int = Field(default=5, ge=1, le=50)
     isolated: bool = True
-    risk_per_trade_pct: float = 2.0
-    max_positions: int = 10
-    max_gross_leverage: float = 8.0
-    daily_loss_stop_pct: float = 10.0
-    max_drawdown_stop_pct: float = 25.0
-    max_notional_per_position_usd: float = 50.0
-    min_notional_usd: float = 10.5
-    max_actions_per_minute: int = 60
-    emergency_actions_reserve: int = 15  # part of the budget only kill/flatten/stale cancels may use
-    reconcile_interval_s: float = 5.0
+    risk_per_trade_pct: float = Field(default=2.0, gt=0, le=10)
+    max_positions: int = Field(default=10, ge=1, le=50)
+    max_gross_leverage: float = Field(default=8.0, gt=0, le=25)
+    daily_loss_stop_pct: float = Field(
+        default=10.0, gt=0, le=50
+    )  # loss limits can be tightened, never disabled
+    max_drawdown_stop_pct: float = Field(default=25.0, gt=0, le=80)
+    max_notional_per_position_usd: float = Field(default=50.0, ge=10, le=1_000_000)
+    min_notional_usd: float = Field(default=10.5, ge=10, le=1_000_000)  # HL minimum order is $10
+    max_actions_per_minute: int = Field(default=60, ge=1, le=1000)
+    # part of the budget only kill/flatten/stale cancels may use
+    emergency_actions_reserve: int = Field(default=15, ge=0)
+    reconcile_interval_s: float = Field(default=5.0, ge=1, le=300)
+
+    @model_validator(mode="after")
+    def _reserve_fits(self) -> RiskConfig:
+        if self.emergency_actions_reserve >= self.max_actions_per_minute:
+            raise ValueError("emergency_actions_reserve must be < max_actions_per_minute")
+        if self.min_notional_usd > self.max_notional_per_position_usd:
+            raise ValueError("min_notional_usd must be <= max_notional_per_position_usd")
+        return self
 
 
 class FeesConfig(BaseModel):

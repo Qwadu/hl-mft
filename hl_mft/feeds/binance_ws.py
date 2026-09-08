@@ -68,6 +68,7 @@ class BinanceFeed(ReconnectingWsFeed):
         if coin is None:
             return
         self.msg_count += 1
+        self.mark_data()
         await self.bus.publish(
             RefTick(
                 source="binance",
