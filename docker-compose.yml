@@ -1,0 +1,36 @@
+services:
+  bot:
+    build: .
+    image: hl-mft:latest
+    container_name: hl-mft
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml   # rw: dashboard "persist" writes back here
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"   # dashboard: reach it over an SSH tunnel, never expose publicly
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: hl-mft-alloy
+    profiles: [grafana]   # start with `docker compose --profile grafana up -d` once GRAFANA_CLOUD_* are in .env
+    restart: unless-stopped
+    env_file: .env
+    command: ["run", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./deploy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [bot]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+volumes:
+  alloy-data:

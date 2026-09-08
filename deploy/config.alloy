@@ -1,0 +1,44 @@
+// Grafana Alloy: scrape bot metrics and ship them (plus container logs) to Grafana Cloud.
+// Credentials come from .env: GRAFANA_CLOUD_PROM_URL / GRAFANA_CLOUD_PROM_USER / GRAFANA_CLOUD_API_KEY
+// and optionally GRAFANA_CLOUD_LOKI_URL / GRAFANA_CLOUD_LOKI_USER for logs.
+
+prometheus.scrape "bot" {
+  targets         = [{ __address__ = "bot:9108", job = "hl-mft", instance = env("HOSTNAME") }]
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_PROM_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_PROM_USER")
+      password = env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
+
+discovery.docker "local" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "name"
+    values = ["hl-mft"]
+  }
+}
+
+loki.source.docker "bot" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.local.targets
+  labels     = { job = "hl-mft" }
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_LOKI_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_LOKI_USER")
+      password = env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
