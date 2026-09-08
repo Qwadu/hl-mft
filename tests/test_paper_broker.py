@@ -69,6 +69,16 @@ async def test_maker_ttl_expiry(env) -> None:  # type: ignore[no-untyped-def]
     assert evs[-1].status == "expired" and not fills
 
 
+async def test_maker_ttl_expiry_on_trade_only_interval(env) -> None:  # type: ignore[no-untyped-def]
+    bus, broker, fills, evs = env
+    clock.set_sim_time(NS)
+    await bus.publish(l2("X", NS, 100.0, 101.0))
+    assert await broker.place(OrderRequest("X", -1, 1.0, 101.0, "maker", "c1", ttl_s=1.0))
+    # no book update since placement; a trade through our price arrives after the TTL
+    await bus.publish(Trade("X", 0, NS + 2 * NS, 102.0, 5.0, True, 1, "", ""))
+    assert evs[-1].status == "expired" and not fills and broker.open_orders("X") == []
+
+
 async def test_taker_walks_book(env) -> None:  # type: ignore[no-untyped-def]
     bus, broker, fills, evs = env
     clock.set_sim_time(NS)

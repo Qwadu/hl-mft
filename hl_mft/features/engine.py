@@ -51,7 +51,8 @@ class CoinFeatures:
         st = self.stats.get(name)
         if st is None:
             st = self.stats[name] = RollingStats(self.cfg.zscore_window_s)
-        z = st.z(v)
+        st.evict(now_ns)
+        z = st.z(v)  # baseline excludes the current sample
         st.add(now_ns, v)
         return z
 

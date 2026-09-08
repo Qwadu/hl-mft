@@ -53,12 +53,18 @@ class RollingStats:
         self._q.append((ts_ns, v))
         self._s += v
         self._s2 += v * v
-        cutoff = ts_ns - self.window_ns
+        self.evict(ts_ns)
+
+    def evict(self, now_ns: int) -> None:
+        """Drop observations older than the window; call before `z()` so a gap cannot leave stale stats."""
+        cutoff = now_ns - self.window_ns
         q = self._q
         while q and q[0][0] < cutoff:
             _, o = q.popleft()
             self._s -= o
             self._s2 -= o * o
+        if not q:
+            self._s = self._s2 = 0.0
 
     @property
     def n(self) -> int:

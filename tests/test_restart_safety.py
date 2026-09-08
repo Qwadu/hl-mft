@@ -116,6 +116,33 @@ async def test_reconciled_position_gets_stop_on_first_tick() -> None:
         clock.set_sim_time(None)
 
 
+@pytest.mark.asyncio
+async def test_disabled_strategy_still_manages_open_position() -> None:
+    clock.set_sim_time(NS)
+    try:
+        broker = StubBroker({"ZEC": (49.9, 50.1)})
+        pf = Portfolio(equity_start=1000.0)
+        risk = RiskManager(RiskConfig(), pf)
+        strat = FlowStrategy(
+            StrategyConfig(min_stop_bps=6.0), EventBus(), broker, pf, risk, {"ZEC": meta("ZEC")}
+        )
+        pf.set_position("ZEC", 2.0, 50.0)
+        strat.enabled = False
+        await strat.on_features(_fv("ZEC", 50.0))
+        assert strat.state("ZEC").stop_bps == 6.0
+        await strat.on_features(_fv("ZEC", 50.0 * (1 - 0.0007), ns=NS + 1))  # -7 bps: stop
+        assert len(broker.placed) == 1 and broker.placed[0].reduce_only
+        # a coin outside enabled_coins: still managed, but no entry once flat
+        strat.enabled = True
+        strat.cfg = StrategyConfig(enabled_coins=["ETH"])
+        pf.set_position("ZEC", 0.0, 0.0)
+        strat.state("ZEC").exit_cid = ""
+        await strat.on_features(_fv("ZEC", 50.0, ns=NS + 2))
+        assert len(broker.placed) == 1
+    finally:
+        clock.set_sim_time(None)
+
+
 # -- orphan exchange orders -------------------------------------------------------------------------
 
 

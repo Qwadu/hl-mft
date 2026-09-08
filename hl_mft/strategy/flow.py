@@ -126,16 +126,16 @@ class FlowStrategy:
         metrics.mid_px.labels(coin=fv.coin).set(fv.mid)
         metrics.spread_bps.labels(coin=fv.coin).set(fv.spread_bps)
         self.pf.mark(fv.coin, fv.mid)
-        if not self.enabled:
-            return
-        if self.cfg.enabled_coins and fv.coin not in self.cfg.enabled_coins:
-            return
         pos = self.pf.pos(fv.coin)
         now = fv.recv_ns
         if pos.size != 0:
+            # open exposure is always managed (stop/TP/max-hold), even when entries are disabled
             await self._manage_position(st, fv, pos.size, pos.entry_px, pos.opened_ns)
-        else:
+        elif self._entries_allowed(fv.coin):
             await self._maybe_enter(st, fv, now)
+
+    def _entries_allowed(self, coin: str) -> bool:
+        return self.enabled and (not self.cfg.enabled_coins or coin in self.cfg.enabled_coins)
 
     # -- entries -------------------------------------------------------------
     async def _maybe_enter(self, st: CoinState, fv: FeatureVector, now: int) -> None:

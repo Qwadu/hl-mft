@@ -49,3 +49,14 @@ def test_rolling_z() -> None:
     assert abs(r.mean - 0.5) < 1e-12
     assert abs(r.z(1.0) - 1.0) < 1e-9
     assert r.z(1.0, min_n=100) == 0.0
+
+
+def test_rolling_z_after_gap_longer_than_window() -> None:
+    r = RollingStats(window_s=100.0, min_dt_s=0.0)
+    for i in range(1, 41):
+        r.add(i * 10**9, float(i % 2))
+    assert r.z(1.0) != 0.0
+    # feed outage: next observation arrives long after every sample has expired
+    r.evict(1000 * 10**9)
+    assert r.n == 0 and r.mean == 0.0 and r.std == 0.0
+    assert r.z(1.0) == 0.0  # no baseline -> neutral, cannot trigger an entry

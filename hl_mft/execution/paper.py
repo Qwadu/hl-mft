@@ -141,7 +141,13 @@ class PaperBroker:
 
     async def _on_trade(self, t: Trade) -> None:
         for o in list(self.orders.get(t.coin, {}).values()):
-            if o.req.kind != "maker" or t.recv_ns < o.active_ns:
+            if o.req.kind != "maker":
+                continue
+            if o.expires_ns and t.recv_ns >= o.expires_ns:
+                self.orders[t.coin].pop(o.req.cid, None)
+                await self._emit(o.req, "expired", t.recv_ns, "ttl")
+                continue
+            if t.recv_ns < o.active_ns:
                 continue
             side = o.req.side
             # our buy fills when a seller aggresses at/below our price (trade side is aggressor)
